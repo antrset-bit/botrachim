@@ -4,30 +4,20 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
-import google.generativeai as genai
-from google.api_core.exceptions import NotFound, FailedPrecondition
+from gigachat import GigaChat
 
 load_dotenv()
-log = logging.getLogger("gemini-svc")
+log = logging.getLogger("gigachat-svc")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-MODEL_NAME = os.getenv("GEMINI_TEXT_MODEL", "gemini-flash-latest")
-if not GEMINI_API_KEY:
-    log.warning("GEMINI_API_KEY is not set; /summarize will be disabled")
-else:
-    genai.configure(api_key=GEMINI_API_KEY)
+GIGACHAT_CREDENTIALS = os.getenv("GIGACHAT_CREDENTIALS", "")
+GIGACHAT_SCOPE = os.getenv("GIGACHAT_SCOPE", "GIGACHAT_API_PERS")
+GIGACHAT_MODEL = os.getenv("GIGACHAT_MODEL", "GigaChat")
 
-def safe_model(name: str):
-    try:
-        return genai.GenerativeModel(name)
-    except Exception as e:
-        log.warning("Model %s not available (%s), fallback to gemini-flash-latest", name, e)
-        return genai.GenerativeModel("gemini-flash-latest")
+if not GIGACHAT_CREDENTIALS:
+    log.warning("GIGACHAT_CREDENTIALS is not set; /summarize will be disabled")
 
-MODEL = safe_model(MODEL_NAME)
-
-app = FastAPI(title="Gemini Summarizer API", version="1.0.0")
+app = FastAPI(title="GigaChat Summarizer API", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -79,29 +69,46 @@ def index():
 
 @app.get("/healthz")
 def healthz():
-    return {"ok": True, "model": MODEL_NAME}
+    return {"ok": True, "model": GIGACHAT_MODEL}
 
 @app.post("/summarize", response_model=SummarizeOut)
 def summarize(inp: SummarizeIn):
     transcript = (inp.transcript or "").strip()
     if not transcript:
         raise HTTPException(status_code=400, detail="transcript is empty")
+
+    if not GIGACHAT_CREDENTIALS:
+        raise HTTPException(status_code=503, detail="GigaChat is not configured")
+
     prompt = PROMPT_TMPL.format(transcript=transcript)
+
     try:
-        resp = MODEL.generate_content(prompt, request_options={"timeout": 90})
-    except FailedPrecondition as e:
-        raise HTTPException(status_code=503, detail=f"Gemini region blocked: {e!s}")
-    except NotFound as e:
-        raise HTTPException(status_code=502, detail=f"Gemini model not found: {e!s}")
+        with GigaChat(
+            credentials=GIGACHAT_CREDENTIALS,
+            scope=GIGACHAT_SCOPE,
+            model=GIGACHAT_MODEL,
+            verify_ssl_certs=False,
+        ) as giga:
+            response = giga.chat(prompt)
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Gemini error: {e!s}")
-    text = (getattr(resp, "text", None) or "").strip()
+        raise HTTPException(status_code=502, detail=f"GigaChat error: {e!s}")
+
+    text = ""
+    try:
+        text = (response.choices[0].message.content or "").strip()
+    except Exception:
+        text = ""
+
+    if not text:
+        raise HTTPException(status_code=502, detail="Empty response from GigaChat")
+
     if "### ТЗ" in text:
         parts = text.split("### ТЗ", 1)
         summary = parts[0].replace("### Саммари", "").strip()
         tech = parts[1].strip()
     else:
         summary, tech = text, ""
+
     return {"summary": summary, "tech_spec": tech}
 
 if __name__ == "__main__":
