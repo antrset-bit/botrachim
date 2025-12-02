@@ -11,7 +11,7 @@ from aiogram.filters import CommandStart, Command
 import httpx
 
 # AI
-import google.generativeai as genai
+from gigachat import GigaChat
 
 # STT
 from faster_whisper import WhisperModel
@@ -50,13 +50,9 @@ if not TELEGRAM_TOKEN:
 
 SUMMARIZE_URL = os.getenv("SUMMARIZE_URL", "http://127.0.0.1:8000/summarize")
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GEMINI_TEXT_MODEL = os.getenv("GEMINI_TEXT_MODEL", "gemini-flash-latest")
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
-    GEMINI_MODEL = genai.GenerativeModel(GEMINI_TEXT_MODEL)
-else:
-    GEMINI_MODEL = None
+GIGACHAT_CREDENTIALS = os.getenv("GIGACHAT_CREDENTIALS")
+GIGACHAT_SCOPE = os.getenv("GIGACHAT_SCOPE", "GIGACHAT_API_PERS")
+GIGACHAT_MODEL = os.getenv("GIGACHAT_MODEL", "GigaChat")
 
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "base")
 WHISPER_COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE_TYPE", "int8")
@@ -150,19 +146,35 @@ async def handle_audio(message: Message):
 
 # AI chat
 async def ai_chat_reply(uid: int, text: str) -> str:
-    if not GEMINI_MODEL: return "AI-чат недоступен: не задан GEMINI_API_KEY."
+    if not GIGACHAT_CREDENTIALS:
+        return "AI-чат недоступен: не заданы GIGACHAT_* переменные."
+
     hist = user_chat_history.setdefault(uid, [])[-20:]
     hist.append(("user", text))
-    prompt = []
+
+    lines = []
     for role, t in hist:
         prefix = "User:" if role == "user" else "Assistant:"
-        prompt.append(f"{prefix} {t}")
-    prompt.append("Assistant:")
+        lines.append(f"{prefix} {t}")
+    lines.append("Assistant:")
+    full_prompt = "
+".join(lines)
+
+    def _call_llm():
+        with GigaChat(
+            credentials=GIGACHAT_CREDENTIALS,
+            scope=GIGACHAT_SCOPE,
+            model=GIGACHAT_MODEL,
+            verify_ssl_certs=False,
+        ) as giga:
+            return giga.chat(full_prompt)
+
     try:
-        resp = await asyncio.to_thread(GEMINI_MODEL.generate_content, "\n".join(prompt))
-        ans = (getattr(resp, "text", None) or "").strip() or "Пустой ответ."
+        response = await asyncio.to_thread(_call_llm)
+        ans = (response.choices[0].message.content or "").strip() or "Пустой ответ."
     except Exception as e:
         ans = f"Ошибка AI: {e}"
+
     user_chat_history[uid] = hist + [("assistant", ans)]
     return ans
 
